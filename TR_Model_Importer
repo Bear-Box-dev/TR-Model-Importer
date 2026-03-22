@@ -1,0 +1,114 @@
+import maya.cmds as cmds
+import struct
+import os
+
+def read_fixed_string(f, length):
+    if length <= 0: return ""
+    data = f.read(length)
+    # กันเหนียวเผื่อไฟล์อ่านเจอตัวอักษรขยะ
+    return data.decode('ascii', errors='ignore').split('\x00')[0]
+
+def import_tr_m1_v2():
+    basic_filter = "Tales Runner Mesh (*.m1)"
+    filenames = cmds.fileDialog2(fileFilter=basic_filter, dialogStyle=2, fileMode=1)
+    
+    if not filenames:
+        return
+
+    m1_path = filenames[0]
+    
+    with open(m1_path, 'rb') as f:
+        # เช็ก Header
+        header = read_fixed_string(f, 16)
+        if header != "CharModelMesh2":
+            cmds.confirmDialog(title='Error', message='ไฟล์ไม่ใช่ฟอร์แมตของ Tales Runner!', button=['OK'])
+            return
+
+        unknown = struct.unpack('<I', f.read(4))[0]
+        unknown2 = struct.unpack('<I', f.read(4))[0] # <--- ตัวปัญหา! รอบนี้เราจะอ่านค่ามันเก็บไว้
+        
+        name_len = struct.unpack('<H', f.read(2))[0]
+        mesh_name = read_fixed_string(f, name_len)
+        if not mesh_name: mesh_name = "TR_Mesh"
+        
+        f.seek(4 + 0x34 + 4, 1) # ข้ามตัวแปรที่ไม่จำเป็น
+        
+        face_block_size = struct.unpack('<I', f.read(4))[0]
+        string_block_size = struct.unpack('<I', f.read(4))[0]
+        
+        f.seek(string_block_size, 1) # ข้ามข้อมูลเรื่องกระดูกไปก่อน
+        
+        # วนลูปข้ามข้อมูลตามจำนวนที่ unknown2 กำหนด (แก้บัค Offset เคลื่อน)
+        for _ in range(unknown2):
+            f.seek(2, 1)
+            
+        f.seek(4 + 1, 1) # ข้ามค่า long และ byte
+        
+        fvf = struct.unpack('<I', f.read(4))[0]
+        num_verts = struct.unpack('<I', f.read(4))[0]
+        num_faces = struct.unpack('<I', f.read(4))[0]
+        verts_block_size = struct.unpack('<I', f.read(4))[0]
+
+        verts = []
+        uvs = []
+        
+        # อ่านจุด Vertices และ UV
+        for i in range(num_verts):
+            vx, vy, vz = struct.unpack('<fff', f.read(12))
+            verts.append((vx, vy, vz))
+            
+            if fvf == 0x811E: 
+                f.seek(20, 1) # ข้ามข้อมูลน้ำหนักกระดูก (Weights)
+            
+            nx, ny, nz = struct.unpack('<fff', f.read(12)) # ข้าม Normals
+            
+            try:
+                u, v = struct.unpack('<ff', f.read(8)) # ดึง UV
+                uvs.append((u, 1.0 - v)) # กลับหัว V ตามแกน 3D
+            except struct.error:
+                print("เจอ Error ตรง UV ของจุดที่", i)
+                break
+                
+        f.seek(4, 1) # ข้าม Indices Block Size
+        
+        # อ่านข้อมูลหน้าตัด (Faces)
+        faces = []
+        for i in range(num_faces):
+            f1, f2, f3 = struct.unpack('<HHH', f.read(6))
+            faces.append((f1, f2, f3))
+
+    # ==========================================
+    # เคล็ดลับ: เขียนเป็นไฟล์ .OBJ ชั่วคราวเพื่อลดอาการ Maya ค้าง
+    # ==========================================
+    temp_obj = m1_path + ".obj"
+    has_uv = len(uvs) == len(verts)
+    
+    with open(temp_obj, 'w') as out:
+        out.write(f"g {mesh_name}\n")
+        # เขียนจุด (Vertices)
+        for v in verts:
+            out.write(f"v {v[0]:.6f} {v[1]:.6f} {v[2]:.6f}\n")
+        # เขียน UV
+        for vt in uvs:
+            out.write(f"vt {vt[0]:.6f} {vt[1]:.6f}\n")
+        # เขียน Faces (OBJ เริ่มนับจาก 1)
+        for f_idx in faces:
+            v1, v2, v3 = f_idx[0]+1, f_idx[1]+1, f_idx[2]+1
+            if has_uv:
+                out.write(f"f {v1}/{v1} {v2}/{v2} {v3}/{v3}\n")
+            else:
+                out.write(f"f {v1} {v2} {v3}\n")
+            
+    # สั่งให้ Maya Import ไฟล์ OBJ ที่เราแอบสร้างไว้
+    cmds.file(temp_obj, i=True, type="OBJ", ignoreVersion=True, mergeNamespacesOnClash=False, options="mo=1", pr=True)
+    
+    # ทำความสะอาด ลบไฟล์ OBJ ชั่วคราวทิ้ง
+    try:
+        os.remove(temp_obj)
+    except:
+        pass
+        
+    print(f"Import {mesh_name} สำเร็จเรียบร้อยแล้ว!")
+
+# เรียกใช้งานฟังก์ชัน
+import_tr_m1_v2()
