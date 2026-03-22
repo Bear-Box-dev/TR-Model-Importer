@@ -1,0 +1,132 @@
+import bpy
+import struct
+import os
+from bpy_extras.io_utils import ImportHelper
+from bpy.props import StringProperty
+from bpy.types import Operator
+
+def read_fixed_string(f, length):
+    if length <= 0: return ""
+    data = f.read(length)
+    # กันเหนียวเผื่อไฟล์อ่านเจอตัวอักษรขยะ
+    return data.decode('ascii', errors='ignore').split('\x00')[0]
+
+def load_m1_model(filepath):
+    with open(filepath, 'rb') as f:
+        # เช็ก Header
+        header = read_fixed_string(f, 16)
+        if header != "CharModelMesh2":
+            def draw(self, context):
+                self.layout.label(text="ไฟล์ไม่ใช่ฟอร์แมตของ Tales Runner (.m1)!")
+            bpy.context.window_manager.popup_menu(draw, title="Error", icon='ERROR')
+            return {'CANCELLED'}
+
+        unknown = struct.unpack('<I', f.read(4))[0]
+        unknown2 = struct.unpack('<I', f.read(4))[0]
+        
+        name_len = struct.unpack('<H', f.read(2))[0]
+        mesh_name = read_fixed_string(f, name_len)
+        if not mesh_name: mesh_name = "TR_Mesh"
+        
+        f.seek(4 + 0x34 + 4, 1) # ข้ามตัวแปรที่ไม่จำเป็น
+        
+        face_block_size = struct.unpack('<I', f.read(4))[0]
+        string_block_size = struct.unpack('<I', f.read(4))[0]
+        
+        f.seek(string_block_size, 1) # ข้ามข้อมูลเรื่องกระดูกไปก่อน
+        
+        # วนลูปข้ามข้อมูลตามจำนวนที่ unknown2 กำหนด
+        for _ in range(unknown2):
+            f.seek(2, 1)
+            
+        f.seek(4 + 1, 1) # ข้ามค่า long และ byte
+        
+        fvf = struct.unpack('<I', f.read(4))[0]
+        num_verts = struct.unpack('<I', f.read(4))[0]
+        num_faces = struct.unpack('<I', f.read(4))[0]
+        verts_block_size = struct.unpack('<I', f.read(4))[0]
+
+        verts = []
+        uvs = []
+        
+        # อ่านจุด Vertices และ UV
+        for i in range(num_verts):
+            vx, vy, vz = struct.unpack('<fff', f.read(12))
+            verts.append((vx, vy, vz))
+            
+            if fvf == 0x811E: 
+                f.seek(20, 1) # ข้ามข้อมูลน้ำหนักกระดูก (Weights)
+            
+            f.seek(12, 1) # ข้าม Normals
+            
+            try:
+                u, v = struct.unpack('<ff', f.read(8)) # ดึง UV
+                uvs.append((u, 1.0 - v)) # กลับหัว V ตามแนวแกนมาตรฐาน
+            except struct.error:
+                print(f"เจอ Error ตรง UV ของจุดที่ {i}")
+                break
+                
+        f.seek(4, 1) # ข้าม Indices Block Size
+        
+        # อ่านข้อมูลหน้าตัด (Faces)
+        faces = []
+        for i in range(num_faces):
+            f1, f2, f3 = struct.unpack('<HHH', f.read(6))
+            faces.append((f1, f2, f3))
+
+    # ==========================================
+    # สร้างโมเดล 3D ใน Blender (เร็วกว่า Maya มาก)
+    # ==========================================
+    mesh = bpy.data.meshes.new(mesh_name)
+    
+    # ยัดข้อมูล Vertices และ Faces เข้าไป
+    mesh.from_pydata(verts, [], faces)
+    mesh.update()
+
+    # สร้าง UV Map
+    if uvs and len(uvs) >= len(verts):
+        uv_layer = mesh.uv_layers.new(name="UVMap")
+        # Blender กำหนด UV ตาม Face Corner (Loop) ไม่ใช่ต่อ Vertex ตรงๆ
+        for loop in mesh.loops:
+            uv_layer.data[loop.index].uv = uvs[loop.vertex_index]
+
+    # สร้าง Object และเชื่อมเข้ากับ Scene ปัจจุบัน
+    obj = bpy.data.objects.new(mesh_name, mesh)
+    bpy.context.collection.objects.link(obj)
+    
+    # ตั้งให้ Object ที่เพิ่งสร้างเป็น Active และถูกเลือกไว้
+    bpy.context.view_layer.objects.active = obj
+    obj.select_set(True)
+
+    print(f"Import {mesh_name} เข้า Blender สำเร็จเรียบร้อยแล้ว!")
+    return {'FINISHED'}
+
+
+# ==========================================
+# ส่วนของการสร้างหน้าต่างเลือกไฟล์ (UI)
+# ==========================================
+class ImportTRM1(Operator, ImportHelper):
+    bl_idname = "import_mesh.tr_m1"  # ชื่อคำสั่งภายใน Blender
+    bl_label = "Import TR Model (.m1)"
+    bl_options = {'REGISTER', 'UNDO'}
+    
+    # กำหนดให้โชว์เฉพาะไฟล์ .m1
+    filename_ext = ".m1"
+    filter_glob: StringProperty(
+        default="*.m1",
+        options={'HIDDEN'},
+    )
+    
+    def execute(self, context):
+        return load_m1_model(self.filepath)
+
+def register():
+    # ป้องกันบัคถ้าเผลอกดรันซ้ำ
+    try: bpy.utils.unregister_class(ImportTRM1)
+    except: pass
+    bpy.utils.register_class(ImportTRM1)
+
+if __name__ == "__main__":
+    register()
+    # สั่งให้เปิดหน้าต่างเลือกไฟล์ขึ้นมาทันทีที่รันสคริปต์
+    bpy.ops.import_mesh.tr_m1('INVOKE_DEFAULT')
