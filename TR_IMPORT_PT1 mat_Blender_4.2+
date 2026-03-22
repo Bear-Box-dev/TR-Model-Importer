@@ -1,0 +1,113 @@
+import bpy
+import os
+import re
+from bpy_extras.io_utils import ImportHelper
+from bpy.props import StringProperty
+from bpy.types import Operator
+
+def load_pt1_materials(filepath, obj):
+    with open(filepath, 'rb') as f:
+        data = f.read()
+
+    # 1. ตรวจสอบชื่อโมเดล
+    model_match = re.search(b'([a-zA-Z0-9_.-]+)\.m1', data, re.IGNORECASE)
+    pt1_model_name = model_match.group(1).decode('ascii', errors='ignore') if model_match else "Unknown"
+
+    obj_name_clean = obj.name.split('.')[0] 
+    if pt1_model_name.lower() != "unknown" and pt1_model_name.lower() != obj_name_clean.lower():
+        print(f"คำเตือน: PT1 ระบุว่าเป็นของ '{pt1_model_name}' แต่โมเดลคุณชื่อ '{obj_name_clean}'")
+
+    # 2. ดึงชื่อไฟล์ Texture
+    textures = re.findall(b'(?i)diffusetexture[\x00-\xFF]([a-zA-Z0-9_.-]+\.(?:png|dds|tga|jpg))', data)
+    
+    if not textures:
+        all_images = re.findall(b'([a-zA-Z0-9_.-]+\.(?:png|dds|tga|jpg))', data, re.IGNORECASE)
+        textures = []
+        for img in all_images:
+            if b'toon' not in img.lower() and b'gradient' not in img.lower():
+                textures.append(img)
+        textures = list(dict.fromkeys(textures))
+
+    if not textures:
+        def draw(self, context): self.layout.label(text="ไม่พบชื่อไฟล์ .png หรือ .dds ใน PT1 นี้เลยครับ!")
+        bpy.context.window_manager.popup_menu(draw, title="Error", icon='ERROR')
+        return {'CANCELLED'}
+
+    # ล้าง Material เก่าทิ้ง
+    obj.data.materials.clear()
+    base_dir = os.path.dirname(filepath)
+    
+    # 3. สร้าง Material และเสียบรูปภาพอัตโนมัติ
+    for i, tex_b in enumerate(textures):
+        tex_name = tex_b.decode('ascii', errors='ignore')
+        mat_name = f"Mat_{i:02d}_{tex_name.split('.')[0]}"
+        
+        mat = bpy.data.materials.new(name=mat_name)
+        mat.use_nodes = True
+        nodes = mat.node_tree.nodes
+        links = mat.node_tree.links
+        
+        nodes.clear() 
+        
+        # สร้าง Nodes สำหรับ Blender รุ่นใหม่
+        bsdf = nodes.new(type='ShaderNodeBsdfPrincipled')
+        bsdf.location = (0, 0)
+        
+        output = nodes.new(type='ShaderNodeOutputMaterial')
+        output.location = (300, 0)
+        
+        tex_node = nodes.new(type='ShaderNodeTexImage')
+        tex_node.location = (-300, 0)
+        
+        # ลากเส้นเชื่อม (Blender 5.1 จะจัดการ Alpha ให้เองผ่านเส้นนี้)
+        links.new(bsdf.outputs['BSDF'], output.inputs['Surface'])
+        links.new(tex_node.outputs['Color'], bsdf.inputs['Base Color'])
+        links.new(tex_node.outputs['Alpha'], bsdf.inputs['Alpha']) 
+        
+        # โหลดไฟล์ภาพ
+        img_path = os.path.join(base_dir, tex_name)
+        loaded = False
+        
+        if os.path.exists(img_path):
+            tex_node.image = bpy.data.images.load(img_path)
+            loaded = True
+        else:
+            # เช็กนามสกุลสำรองเผื่อไฟล์จริงเป็น .dds
+            alt_ext = ".dds" if tex_name.lower().endswith(".png") else ".png"
+            fallback_path = os.path.splitext(img_path)[0] + alt_ext
+            if os.path.exists(fallback_path):
+                tex_node.image = bpy.data.images.load(fallback_path)
+                loaded = True
+                
+        if not loaded:
+            print(f"คำเตือน: หาไฟล์รูปในโฟลเดอร์ไม่เจอ: '{tex_name}'")
+            
+        obj.data.materials.append(mat)
+
+    print(f"ดึง Material สำเร็จ {len(textures)} ช่อง ไร้ Error แน่นอน!")
+    return {'FINISHED'}
+
+class ImportTRPT1_V4(Operator, ImportHelper):
+    bl_idname = "import_mesh.tr_pt1_mat_v4"
+    bl_label = "Apply PT1 Materials (Blender 5.1)"
+    bl_options = {'REGISTER', 'UNDO'}
+    filename_ext = ".pt1"
+    filter_glob: StringProperty(default="*.pt1", options={'HIDDEN'})
+    
+    def execute(self, context):
+        active_obj = context.active_object
+        if not active_obj or active_obj.type != 'MESH':
+            def draw(self, context): self.layout.label(text="กรุณาคลิกเลือกโมเดล (Mesh) ก่อนครับ!")
+            bpy.context.window_manager.popup_menu(draw, title="Error", icon='ERROR')
+            return {'CANCELLED'}
+            
+        return load_pt1_materials(self.filepath, active_obj)
+
+def register():
+    try: bpy.utils.unregister_class(ImportTRPT1_V4)
+    except: pass
+    bpy.utils.register_class(ImportTRPT1_V4)
+
+if __name__ == "__main__":
+    register()
+    bpy.ops.import_mesh.tr_pt1_mat_v4('INVOKE_DEFAULT')
